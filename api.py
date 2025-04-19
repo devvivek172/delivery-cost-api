@@ -73,20 +73,16 @@ def _calculate_travel_cost_between_stops(loc_a, loc_b, weight_carried):
 
 # --- Core Calculation Logic (_calculate_overall_minimum_cost - Mostly same) ---
 def _calculate_overall_minimum_cost(order_data):
-    # Input: validated_order - {product_code: quantity > 0}
-    # Output: (cost, None) or (None, error_message)
-
-    items_needed = order_data # Already validated
+    items_needed = order_data
     if not items_needed:
-        return 0, None # No items, no cost
+        return 0, None
 
     needed_centers = set()
     weight_from_center = {c: 0.0 for c in CENTERS}
     total_weight = 0.0
 
-    # 1. Calculate weights per center based on the validated order
     for product_code, quantity in items_needed.items():
-        product_info = PRODUCTS[product_code] # Assumes product exists (validated earlier)
+        product_info = PRODUCTS[product_code]
         center = product_info["center"]
         weight = product_info["weight"]
         item_total_weight = weight * quantity
@@ -96,109 +92,89 @@ def _calculate_overall_minimum_cost(order_data):
 
     min_overall_cost = float('inf')
 
-    # 2. Iterate through possible starting centers and strategies
     for start_center in CENTERS:
-        # Strategy 1: Simple Pickup (Start -> Visit others -> L1)
         cost_simple = float('inf')
         pickup_centers_to_visit = list(needed_centers - {start_center})
 
+        # 🚚 STRATEGY 1: Simple (pick all first)
         if not pickup_centers_to_visit:
-            # Only need items from start_center (or no items needed from this start - handled by check below)
-             if start_center in needed_centers:
-                 cost_simple = _calculate_travel_cost_between_stops(start_center, 'L1', total_weight)
+            if start_center in needed_centers:
+                cost_simple = _calculate_travel_cost_between_stops(start_center, 'L1', total_weight)
         else:
-            # Iterate through permutations of remaining centers to visit
             min_perm_cost = float('inf')
             for order in itertools.permutations(pickup_centers_to_visit):
                 current_perm_cost = 0.0
-                current_perm_weight = weight_from_center.get(start_center, 0.0) # Weight leaving start_center
+                current_weight = weight_from_center.get(start_center, 0.0)
                 loc_a = start_center
                 valid_path = True
 
-                # Travel through the permutation of pickup centers
                 for loc_b in order:
-                    segment_cost = _calculate_travel_cost_between_stops(loc_a, loc_b, current_perm_weight)
+                    segment_cost = _calculate_travel_cost_between_stops(loc_a, loc_b, current_weight)
                     if segment_cost == float('inf'):
                         valid_path = False
                         break
                     current_perm_cost += segment_cost
-                    current_perm_weight += weight_from_center.get(loc_b, 0.0) # Add weight picked up at loc_b
-                    loc_a = loc_b # Move to the next location
+                    current_weight += weight_from_center.get(loc_b, 0.0)
+                    loc_a = loc_b
 
                 if not valid_path:
-                    continue # Try next permutation if this one is impossible
+                    continue
 
-                # Final leg from the last pickup center to L1
-                # Note: current_perm_weight should now equal total_weight
-                final_leg_cost = _calculate_travel_cost_between_stops(loc_a, 'L1', total_weight)
+                final_leg_cost = _calculate_travel_cost_between_stops(loc_a, 'L1', current_weight)
                 if final_leg_cost == float('inf'):
-                    continue # This permutation doesn't allow final delivery
+                    continue
 
-                min_perm_cost = min(min_perm_cost, current_perm_cost + final_leg_cost)
+                total_cost = current_perm_cost + final_leg_cost
+                min_perm_cost = min(min_perm_cost, total_cost)
 
-            cost_simple = min_perm_cost # Assign the minimum cost found for this start_center
+            cost_simple = min_perm_cost
 
-        # Strategy 2: Partial Delivery (Start -> L1 -> Visit others -> L1)
+        # 🚚 STRATEGY 2: Partial (drop-off after first center, then pick again)
         cost_partial = float('inf')
-        # Condition: Must have items at start_center and need items from elsewhere
-        if weight_from_center.get(start_center, 0) > EPSILON and len(needed_centers) > 1:
+        if weight_from_center[start_center] > EPSILON and len(needed_centers) > 1:
             weight_leg1 = weight_from_center[start_center]
             cost_leg1 = _calculate_travel_cost_between_stops(start_center, "L1", weight_leg1)
 
             if cost_leg1 != float('inf'):
-                # Calculate cost for the second trip (L1 -> pickup remaining -> L1)
                 remaining_centers = list(needed_centers - {start_center})
                 weight_remaining = total_weight - weight_leg1
-                cost_pickup_and_final_leg = float('inf')
+                min_perm_pickup_cost = float('inf')
 
-                if remaining_centers: # Check if there are remaining centers to visit
-                    min_perm_pickup_cost = float('inf')
-                    for order in itertools.permutations(remaining_centers):
-                        current_pickup_cost = 0.0
-                        current_pickup_weight = 0.0 # Start empty from L1 for the second trip
-                        loc_a = "L1"
-                        valid_pickup_path = True
+                for order in itertools.permutations(remaining_centers):
+                    current_cost = 0.0
+                    current_weight = 0.0
+                    loc_a = "L1"
+                    valid_path = True
 
-                        # Travel through the permutation of remaining centers
-                        for loc_b in order:
-                            segment_cost = _calculate_travel_cost_between_stops(loc_a, loc_b, current_pickup_weight)
-                            if segment_cost == float('inf'):
-                                valid_pickup_path = False
-                                break
-                            current_pickup_cost += segment_cost
-                            current_pickup_weight += weight_from_center.get(loc_b, 0.0)
-                            loc_a = loc_b
+                    for loc_b in order:
+                        segment_cost = _calculate_travel_cost_between_stops(loc_a, loc_b, current_weight)
+                        if segment_cost == float('inf'):
+                            valid_path = False
+                            break
+                        current_cost += segment_cost
+                        current_weight += weight_from_center.get(loc_b, 0.0)
+                        loc_a = loc_b
 
-                        if not valid_pickup_path:
-                            continue
+                    if not valid_path:
+                        continue
 
-                        # Final delivery leg for the second trip (last pickup -> L1)
-                        # Note: current_pickup_weight should equal weight_remaining
-                        final_delivery_cost = _calculate_travel_cost_between_stops(loc_a, 'L1', weight_remaining)
-                        if final_delivery_cost == float('inf'):
-                            continue
+                    final_leg_cost = _calculate_travel_cost_between_stops(loc_a, "L1", current_weight)
+                    if final_leg_cost == float('inf'):
+                        continue
 
-                        min_perm_pickup_cost = min(min_perm_pickup_cost, current_pickup_cost + final_delivery_cost)
+                    total_cost = current_cost + final_leg_cost
+                    min_perm_pickup_cost = min(min_perm_pickup_cost, total_cost)
 
-                    cost_pickup_and_final_leg = min_perm_pickup_cost
-                else:
-                    # This case shouldn't happen if len(needed_centers) > 1 and start_center had weight,
-                    # but handle defensively. If no remaining centers, second trip cost is 0.
-                     cost_pickup_and_final_leg = 0.0
+                if min_perm_pickup_cost != float('inf'):
+                    cost_partial = cost_leg1 + min_perm_pickup_cost
 
-                # Combine cost of first delivery and the second trip if valid
-                if cost_pickup_and_final_leg != float('inf'):
-                    cost_partial = cost_leg1 + cost_pickup_and_final_leg
-
-        # Update overall minimum cost considering both strategies for this start_center
         min_overall_cost = min(min_overall_cost, cost_simple, cost_partial)
 
-    # 3. Return Result
     if min_overall_cost == float('inf'):
         return None, "No valid delivery path found for the given order."
 
-    # Round to nearest integer for the final cost
     return round(min_overall_cost), None
+
 
 # --- Flask Routes ---
 
